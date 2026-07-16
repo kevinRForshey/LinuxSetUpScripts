@@ -26,10 +26,14 @@ else
     log "Make sure vim, git, ctags, fzf, nodejs/npm, and a Nerd Font are installed manually."
 fi
 
-# ── 2. Node-based linters/formatters (ALE: eslint, prettier, tsserver) ─
+# ── 2. Node-based linters/formatters (ALE: eslint, prettier, typescript-language-server) ─
+# typescript-language-server wraps tsserver over LSP; TypeScript 7.x removed
+# the standalone tsserver binary that ALE's built-in 'tsserver' linter needs,
+# and ALE has no built-in linter for typescript-language-server (checked
+# against upstream master), so a custom linter is registered in .vimrc.
 if command -v npm >/dev/null 2>&1; then
-    log "Installing global npm packages: eslint, prettier, typescript"
-    sudo npm install -g eslint prettier typescript
+    log "Installing global npm packages: eslint, prettier, typescript, typescript-language-server"
+    sudo npm install -g eslint prettier typescript typescript-language-server
 fi
 
 # ── 3. Python LSP stack (ALE: pylsp, black, isort, mypy) ──────────────
@@ -43,9 +47,9 @@ else
     log "(or into a project venv — pylsp auto-detects venvs named .venv/venv/env/etc.)"
 fi
 
-# ── 4. OmniSharp / dotnet (optional, for C#) ───────────────────────────
+# ── 4. dotnet SDK check (optional, for C# builds via <F9>/<F10>) ───────
 if ! command -v dotnet >/dev/null 2>&1; then
-    log "dotnet SDK not found — install it manually if you need C# support (OmniSharp)."
+    log "dotnet SDK not found — install it manually if you need C# support."
 fi
 
 # ── 5. Vim directory layout ────────────────────────────────────────────
@@ -100,6 +104,23 @@ done
 
 # vim-devicons must load after nerdtree/airline; pathogen loads bundle/
 # dirs alphabetically so this is just informational, no action needed.
+
+# ── 7b. OmniSharp/Roslyn server (for C# completion via omnisharp-vim) ──
+# omnisharp-vim's own installer, run directly rather than via :OmniSharpInstall
+# so this script stays non-interactive. Its default -l path (~/.omnisharp/,
+# trailing slash) has a bug: it extracts into a dir nested inside itself, then
+# rm -rf's the parent before the final mv, deleting its own output. Passing
+# -l explicitly without a trailing slash (matching omnisharp-vim's own default
+# search path, OmniSharp#util#ServerDir()) avoids it.
+OMNISHARP_DIR="$HOME/.omnisharp/omnisharp-roslyn"
+if [ -d "$BUNDLE_DIR/omnisharp-vim" ]; then
+    if [ ! -x "$OMNISHARP_DIR/run" ]; then
+        log "Installing OmniSharp/Roslyn server to $OMNISHARP_DIR"
+        "$BUNDLE_DIR/omnisharp-vim/installer/omnisharp-manager.sh" -l "$OMNISHARP_DIR"
+    else
+        log "OmniSharp/Roslyn server already installed, skipping"
+    fi
+fi
 
 # ── 8. ~/.vimrc ─────────────────────────────────────────────────────────
 if [ -f "$VIMRC" ]; then
@@ -192,11 +213,27 @@ let g:airline#extensions#tabline#formatter='unique_tail'
 
 " ── ALE ───────────────────────────────────────────────
 let g:ale_linters = {
-\   'cs':         ['OmniSharp'],
 \   'python':     ['pylsp'],
 \   'javascript': ['eslint'],
-\   'typescript': ['eslint', 'tsserver'],
+\   'typescript': ['eslint', 'typescript-language-server'],
 \}
+
+" ALE ships no built-in linter for 'OmniSharp' (checked: not present in
+" ale_linters/cs/) so C# diagnostics/completion come from omnisharp-vim
+" itself, not ALE. See the ── OmniSharp ── section below.
+
+" ALE's bundled 'tsserver' linter needs the standalone tsserver binary that
+" the typescript npm package used to ship in bin/ — TypeScript 7.x removed
+" it, and this ALE version (checked against upstream master, no update
+" available) has no built-in linter for the replacement,
+" typescript-language-server. Register it manually instead.
+call ale#linter#Define('typescript', {
+\   'name': 'typescript-language-server',
+\   'lsp': 'stdio',
+\   'executable': 'typescript-language-server',
+\   'command': '%e --stdio',
+\   'project_root': function('ale#handlers#tsserver#GetProjectRoot'),
+\})
 let g:ale_fixers = {
 \   '*':          ['remove_trailing_lines', 'trim_whitespace'],
 \   'python':     ['isort', 'black'],
@@ -237,12 +274,37 @@ let g:ale_python_pylsp_config = {
 \   },
 \}
 
-" ── LSP completion / navigation (powered by ALE + pylsp) ──
-let g:ale_completion_enabled = 1
+" ── LSP completion / navigation (powered by ALE + pylsp/tsserver, OmniSharp for cs) ──
+" Completion is triggered manually (<Tab> or '.') rather than as-you-type.
+let g:ale_completion_enabled = 0
 let g:ale_completion_autoimport = 1
 let g:ale_completion_max_suggestions = 50
 set omnifunc=ale#completion#OmniFunc
 set completeopt=menuone,popup,noinsert,noselect
+
+" Vim's bundled ftplugin/python.vim and ftplugin/javascript.vim call
+" setlocal omnifunc=... to their own basic completers, which silently
+" overrides the 'set omnifunc' above every time such a buffer loads
+" (ftplugins run on FileType, after this vimrc has already been sourced).
+" Re-assert ALE's LSP-backed omnifunc afterwards. cs is deliberately
+" excluded — omnisharp-vim's own ftplugin already sets omnifunc correctly.
+autocmd FileType python,javascript,javascriptreact,typescript,typescriptreact
+      \ setlocal omnifunc=ale#completion#OmniFunc
+
+" SuperTab: <Tab> falls through to the omnifunc above (context-aware) instead
+" of its undocumented default of buffer-only keyword completion.
+let g:SuperTabDefaultCompletionType = "context"
+let g:SuperTabContextDefaultCompletionType = "<c-x><c-o>"
+let g:SuperTabClosePreviewOnPopupClose = 1
+
+" Also trigger omni-completion automatically after typing '.' (member access).
+" (Also fires on numeric literals like 1.5 and on '...' — harmless, since
+" completeopt=noselect means nothing auto-inserts; just keep typing or <Esc>.)
+function! s:DotComplete() abort
+  return pumvisible() ? '' : "\<C-x>\<C-o>"
+endfunction
+autocmd FileType python,typescript,typescriptreact,cs
+      \ inoremap <buffer><silent><expr> . '.' . <SID>DotComplete()
 
 let g:ale_floating_preview = 1
 let g:ale_hover_to_floating_preview = 1
@@ -261,6 +323,10 @@ nnoremap <silent> <leader>ca :ALECodeAction<CR>
 nnoremap <silent> <F8>       :TagbarToggle<CR>
 
 " ── OmniSharp ─────────────────────────────────────────
+" omnisharp-vim's own ftplugin (ftplugin/cs/OmniSharp.vim) sets
+" omnifunc=OmniSharp#Complete automatically once the server is installed
+" (:OmniSharpInstall / installer/omnisharp-manager.sh) — no manual wiring
+" needed here, SuperTab and the '.' trigger above call it via <C-x><C-o>.
 let g:OmniSharp_server_stdio=1
 let g:OmniSharp_highlight_types=3
 autocmd FileType cs nmap <silent> gd :OmniSharpGotoDefinition<CR>
