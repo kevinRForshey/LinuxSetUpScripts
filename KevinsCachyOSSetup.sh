@@ -36,6 +36,7 @@ LOGFILE="${HOME}/.local/share/kevins-cachyos-setup.log"
 DRY_RUN="${DRY_RUN:-false}"
 REBOOT_REQUIRED=false
 AUR_HELPER=""   # resolved in preflight: paru (CachyOS default) or yay
+SCRIPT_ERRORS=()  # collects "section: reason" for the end-of-run summary
 
 # ── Logging helpers ───────────────────────────────────────────────────────────
 banner() {
@@ -52,6 +53,15 @@ info()  { echo -e "${TEAL}     $1${NC}"; }
 warn()  { echo -e "${YELLOW}  ⚠  $1${NC}"; echo "[$(date '+%H:%M:%S')] WARN: $1" >> "$LOGFILE" 2>/dev/null || true; }
 ok()    { echo -e "${GREEN}  ✓  $1${NC}"; }
 fail()  { echo -e "${RED}${BOLD}  ✗  $1${NC}"; echo "[$(date '+%H:%M:%S')] FAIL: $1" >> "$LOGFILE" 2>/dev/null || true; exit 1; }
+
+# Records a non-fatal section failure so it can be reported in the final
+# summary instead of aborting the whole run. Used as: `some_section || record_error "Section name" $?`
+record_error() {
+    local ctx="$1" rc="${2:-1}"
+    SCRIPT_ERRORS+=("$ctx (exit code $rc)")
+    echo -e "${RED}${BOLD}  ✗  $ctx failed — logged, continuing with remaining setup${NC}"
+    echo "[$(date '+%H:%M:%S')] ERROR: $ctx failed (exit code $rc)" >> "$LOGFILE" 2>/dev/null || true
+}
 
 run_cmd() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -153,7 +163,7 @@ install_base_packages() {
     step "Full system upgrade (CachyOS repos + AUR)..."
     if [[ "$DRY_RUN" != "true" ]]; then
         # CachyOS uses its own optimized repo mirrors; standard pacman -Syu applies
-        sudo pacman -Syu --noconfirm 2>&1 | tee -a "$LOGFILE"
+        sudo pacman -Syu --noconfirm 2>&1 | tee -a "$LOGFILE" || return 1
     else
         info "[DRY-RUN] sudo pacman -Syu --noconfirm"
     fi
@@ -198,7 +208,7 @@ install_base_packages() {
         ctags \
         lsd \
         starship \
-        papirus-icon-theme
+        papirus-icon-theme || return 1
     ok "Base packages installed"
 
     step "Installing CachyOS-specific enhancements..."
@@ -238,17 +248,27 @@ setup_nvidia() {
         fi
     done
 
-    step "Installing nvidia-open-dkms (RTX 5060 / Blackwell)..."
-    pac_install \
-        nvidia-open-dkms \
-        nvidia-utils \
-        lib32-nvidia-utils \
-        nvidia-settings \
-        libvdpau \
-        libva-nvidia-driver \
-        vulkan-icd-loader \
-        lib32-vulkan-icd-loader \
+    step "Checking for kernel-bundled NVIDIA driver..."
+    local NVIDIA_COMMON_PKGS=(
+        nvidia-utils
+        lib32-nvidia-utils
+        nvidia-settings
+        libvdpau
+        libva-nvidia-driver
+        vulkan-icd-loader
+        lib32-vulkan-icd-loader
         opencl-nvidia
+    )
+    local kernel_nvidia_pkg
+    kernel_nvidia_pkg=$(pacman -Qq 2>/dev/null | grep -E '^linux-.*-nvidia-open$' || true)
+
+    step "Installing NVIDIA driver stack (RTX 5060 / Blackwell)..."
+    if [[ -n "$kernel_nvidia_pkg" ]]; then
+        ok "NVIDIA already provided by kernel package: $kernel_nvidia_pkg — skipping nvidia-open-dkms (would conflict)"
+        pac_install "${NVIDIA_COMMON_PKGS[@]}" || return 1
+    else
+        pac_install nvidia-open-dkms "${NVIDIA_COMMON_PKGS[@]}" || return 1
+    fi
 
     step "Enabling NVIDIA DRM modesetting..."
     local modprobe_conf="/etc/modprobe.d/nvidia-options.conf"
@@ -279,7 +299,7 @@ setup_fonts() {
     banner "SECTION 3 · JETBRAINS MONO NERD FONT"
 
     step "Installing JetBrainsMono Nerd Font..."
-    pac_install ttf-jetbrains-mono-nerd
+    pac_install ttf-jetbrains-mono-nerd || return 1
 
     step "Rebuilding font cache..."
     if [[ "$DRY_RUN" != "true" ]]; then
@@ -307,10 +327,10 @@ setup_gnome_theme() {
         gnome-themes-extra \
         gnome-tweaks \
         gnome-shell-extensions \
-        dconf-editor
+        dconf-editor || return 1
 
     step "Installing GNOME Extension Manager from AUR..."
-    aur_install gnome-extension-manager
+    aur_install gnome-extension-manager || warn "gnome-extension-manager unavailable — install manually later"
 
     step "Cloning Catppuccin GTK Theme (Fausto-Korpsvart)..."
     local THEME_DIR="$HOME/.themes"
@@ -320,7 +340,7 @@ setup_gnome_theme() {
         rm -rf "$THEME_REPO"
         git clone --depth=1 \
             "https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git" \
-            "$THEME_REPO"
+            "$THEME_REPO" || { warn "Failed to clone Catppuccin GTK theme repo"; return 1; }
         if [[ -d "$THEME_REPO/themes" ]]; then
             cp -r "$THEME_REPO/themes/"* "$THEME_DIR/"
             ok "GTK themes installed to $THEME_DIR"
@@ -332,7 +352,7 @@ setup_gnome_theme() {
     fi
 
     step "Installing Bibata cursor theme..."
-    aur_install bibata-cursor-theme
+    aur_install bibata-cursor-theme || warn "bibata-cursor-theme unavailable — install manually later"
 
     step "Configuring Papirus folders (violet)..."
     if [[ "$DRY_RUN" != "true" ]]; then
@@ -360,7 +380,7 @@ install_dotnet() {
     pac_install \
         dotnet-sdk \
         aspnet-runtime \
-        aspnet-targeting-pack
+        aspnet-targeting-pack || return 1
 
     step "Verifying .NET installation..."
     if [[ "$DRY_RUN" != "true" ]]; then
@@ -385,7 +405,7 @@ install_nodejs() {
     banner "SECTION 6 · NODE.JS & NPM"
 
     step "Installing Node.js LTS + NPM..."
-    pac_install nodejs npm
+    pac_install nodejs npm || return 1
     ok "Node.js: $(node --version 2>/dev/null || echo 'available after re-login')"
     ok "NPM:     $(npm --version 2>/dev/null || echo 'available after re-login')"
 
@@ -418,7 +438,7 @@ install_python() {
         python-black \
         python-pylsp \
         flake8 \
-        mypy
+        mypy || return 1
 
     ok "Python stack installed"
 }
@@ -1257,7 +1277,7 @@ configure_hyprland() {
         thunar \
         dunst \
         hyprlock \
-        hypridle
+        hypridle || return 1
 
     # CachyOS AUR extras for Hyprland
     aur_install \
@@ -1543,6 +1563,32 @@ install_extra_apps() {
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  SECTION 16 — HEADROOM AI TOOLING                                           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+install_headroom_ai() {
+    banner "SECTION 16 · HEADROOM AI (uv + python3.13 + electron25 + rtk)"
+
+    step "Installing Python 3.13 (AUR)..."
+    aur_install python313 || return 1
+
+    step "Installing uv (Python package/tool manager)..."
+    pac_install python-uv || return 1
+
+    step "Installing Electron 25 and rtk (AUR)..."
+    aur_install electron25-bin rtk || warn "electron25-bin/rtk unavailable — install manually later"
+
+    step "Installing headroom-ai via uv tool..."
+    if [[ "$DRY_RUN" != "true" ]]; then
+        uv tool install --python 3.13 "headroom-ai[all]" 2>&1 | tee -a "$LOGFILE" || return 1
+    else
+        info "[DRY-RUN] uv tool install --python 3.13 \"headroom-ai[all]\""
+    fi
+
+    ok "Headroom AI tooling installed"
+}
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  VALIDATION                                                                 ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 validate_installation() {
@@ -1558,6 +1604,16 @@ validate_installation() {
     done
     _check_cmd "${AUR_HELPER:-paru}"
     _check_cmd hyprland || warn "Hyprland (optional if staying on GNOME)"
+    _check_cmd uv
+    _check_cmd rtk
+
+    info "── Headroom AI ──"
+    if uv tool list 2>/dev/null | grep -q '^headroom-ai'; then
+        ok "headroom-ai (uv tool)"
+    else
+        warn "MISSING: headroom-ai (uv tool)"
+        ((warnings++)) || true
+    fi
 
     info "── Config Files ──"
     _check_file "$HOME/.config/kitty/kitty.conf"
@@ -1602,21 +1658,22 @@ main() {
     banner "KEVIN'S CACHY OS SETUP v${SCRIPT_VERSION}"
 
     preflight
-    install_base_packages
-    setup_nvidia
-    setup_fonts
-    setup_gnome_theme
-    install_dotnet
-    install_nodejs
-    install_python
-    configure_kitty
-    configure_zsh_shell
-    configure_starship
-    configure_zshrc
-    configure_vim
-    configure_fastfetch
-    configure_hyprland
-    install_extra_apps
+    install_base_packages || record_error "System update & base packages" $?
+    setup_nvidia           || record_error "NVIDIA drivers" $?
+    setup_fonts            || record_error "JetBrainsMono Nerd Font" $?
+    setup_gnome_theme      || record_error "Catppuccin GTK theme" $?
+    install_dotnet         || record_error ".NET SDK" $?
+    install_nodejs         || record_error "Node.js & NPM" $?
+    install_python         || record_error "Python dev stack" $?
+    configure_kitty        || record_error "Kitty terminal config" $?
+    configure_zsh_shell    || record_error "ZSH default shell" $?
+    configure_starship     || record_error "Starship prompt" $?
+    configure_zshrc        || record_error ".zshrc" $?
+    configure_vim          || record_error "Vim IDE config" $?
+    configure_fastfetch    || record_error "Fastfetch config" $?
+    configure_hyprland     || record_error "Hyprland + Waybar" $?
+    install_extra_apps     || record_error "Extra apps" $?
+    install_headroom_ai    || record_error "Headroom AI tooling" $?
     validate_installation || true
 
     banner "ALL DONE ON CACHY OS, BOSS 🎉"
@@ -1643,6 +1700,7 @@ main() {
     echo -e "${GREEN}  ✓${NC} Fastfetch (CachyOS logo)"
     echo -e "${GREEN}  ✓${NC} Hyprland + Waybar + Wofi + dunst"
     echo -e "${GREEN}  ✓${NC} DBGate + JetBrains Toolbox"
+    echo -e "${GREEN}  ✓${NC} Python 3.13 + uv + headroom-ai[all] + Electron 25 + rtk"
     echo ""
     echo -e "${YELLOW}${BOLD}  Next steps:${NC}"
     echo -e "${PEACH}  1.${NC} sudo reboot  (required for NVIDIA drivers)"
@@ -1667,6 +1725,18 @@ main() {
     if [[ "$REBOOT_REQUIRED" == true ]]; then
         echo -e "${RED}${BOLD}  ⚠️  REBOOT REQUIRED for NVIDIA drivers.  Run: sudo reboot${NC}"
         echo ""
+    fi
+
+    if [[ ${#SCRIPT_ERRORS[@]} -gt 0 ]]; then
+        banner "ERRORS ENCOUNTERED (${#SCRIPT_ERRORS[@]})"
+        for err in "${SCRIPT_ERRORS[@]}"; do
+            echo -e "${RED}  ✗  $err${NC}"
+        done
+        echo ""
+        echo -e "${YELLOW}  These sections were skipped or only partially completed.${NC}"
+        echo -e "${YELLOW}  Full details: ${LOGFILE}${NC}"
+        echo ""
+        exit 1
     fi
 }
 
