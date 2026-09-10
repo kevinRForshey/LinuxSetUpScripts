@@ -40,7 +40,7 @@ setopt PUSHD_IGNORE_DUPS AUTO_PUSHD PUSHD_SILENT
 autoload -Uz compinit
 compinit -d "$HOME/.zcompdump"
 zstyle ':completion:*'              matcher-list 'm:{a-zA-Z}={A-Za-z}'
-zstyle ':completion:*'              menu select
+zstyle ':completion:*'              menu no            # fzf-tab owns the menu (see end of file)
 zstyle ':completion:*'              list-colors "${(s.:.)LS_COLORS}"
 zstyle ':completion:*:descriptions' format '%F{yellow}-- %d --%f'
 zstyle ':completion:*:warnings'     format '%F{red}-- no matches --%f'
@@ -269,3 +269,57 @@ VERSE=$(curl -s --max-time 4 https://bible-api.com/data/web/random \
 
 # ── Starship prompt ───────────────────────────────────────────────────────────
 eval "$(starship init zsh)"
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  HISTORY-DRIVEN AUTOCOMPLETE — loaded LAST so its keybindings win            ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║  Install once:                                                               ║
+# ║    sudo pacman -S --needed zsh-autosuggestions zsh-syntax-highlighting \      ║
+# ║                            zsh-history-substring-search fzf atuin            ║
+# ║    paru -S --needed zsh-fzf-tab-git                                           ║
+# ║    atuin import auto                                                          ║
+# ║                                                                              ║
+# ║  compinit already ran in the Completion section above — not re-run here.    ║
+# ║  Every source is guarded; a wrong path = that feature silently off, not a   ║
+# ║  broken prompt. Missing a feature? Check: ls /usr/share/zsh/plugins/        ║
+# ║  These intentionally override the ↑/↓ and ^R bindings set earlier.          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# fzf-tab — fuzzy Tab menu (must load AFTER compinit, BEFORE syntax-highlighting)
+if [[ -f /usr/share/zsh/plugins/fzf-tab/fzf-tab.plugin.zsh ]]; then
+    source /usr/share/zsh/plugins/fzf-tab/fzf-tab.plugin.zsh
+    zstyle ':fzf-tab:*' fzf-flags \
+        --color=bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8 \
+        --color=fg:#cdd6f4,header:#f38ba8,info:#cba6f7,pointer:#f5e0dc \
+        --color=marker:#a6e3a1,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8
+    zstyle ':fzf-tab:*' switch-group ',' '.'
+fi
+
+# zsh-autosuggestions — inline ghost text (→ accepts, Ctrl+Space also accepts)
+if [[ -f /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
+    source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
+    ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#7f849c'      # Overlay1 (muted)
+    ZSH_AUTOSUGGEST_STRATEGY=(history completion)
+    bindkey '^ ' autosuggest-accept
+fi
+
+# zsh-syntax-highlighting — colour as you type (load near the end)
+if [[ -f /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+    source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+fi
+
+# zsh-history-substring-search — ↑/↓ prefix search (load AFTER syntax-highlighting)
+if [[ -f /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh ]]; then
+    source /usr/share/zsh/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh
+    HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_FOUND='bg=#cba6f7,fg=#1e1e2e,bold'   # Mauve
+    HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_NOT_FOUND='bg=#f38ba8,fg=#1e1e2e'    # Red
+    bindkey '^[[A' history-substring-search-up
+    bindkey '^[[B' history-substring-search-down
+    bindkey -M vicmd 'k' history-substring-search-up
+    bindkey -M vicmd 'j' history-substring-search-down
+fi
+
+# atuin — SQLite fuzzy Ctrl+R. --disable-up-arrow leaves ↑ to substring-search above.
+if command -v atuin >/dev/null 2>&1; then
+    eval "$(atuin init zsh --disable-up-arrow)"
+fi
